@@ -8,7 +8,7 @@ MIDI CH10 以外の音を先着順に12音まで発生できます。
 Windows から鳴らす場合は LoopMidi と Hairless MIDI-Serial Bride を使えば、任意の MIDI プレイヤーの出力を流すことができます。<br>
 
 
-![Windows MIDI Plaing](screenshot.jpg)
+![Windows MIDI Plaing](screenshot.png)
 
 
 シリアルポートのビットレートを 31250 にして、適当な MIDI 入力回路(市販の Arduino用 MIDI Hatなど)を使えば、
