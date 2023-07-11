@@ -1,14 +1,10 @@
 /*
- * Serial MIDI player for CH32V003
- * Input I2C (SDA PC1/SCL PC2)
+ * Serial MIDI player for CH32V003/203
  *  Output: TIM1CH4 (PC4)
  */
 
 #include "debug.h"
-//#define SAMPLING_FREQ 48000
-//#define SAMPLING_FREQ 44100
-#define SAMPLING_FREQ 32000
-//#define SAMPLING_FREQ 22000
+
 #define TIME_UNIT 100000000                           // Oscillator calculation resolution = 10nsec
 #define SAMPLING_INTERVAL (TIME_UNIT/SAMPLING_FREQ)   // 20.833 usec in 48KHz Sampling freq
 #define RX_BUFFER_LEN 256
@@ -18,16 +14,41 @@
 #define SERIAL_SPEED 115200                            // USB-Serial Bridge
 //#define SERIAL_SPEED 31250                             // MIDI interface(31.25Kbps)
 
-//#define PSG_NUMBERS 1
-//#define PSG_DEVIDE_FACTOR 3
-//#define PSG_NUMBERS 2
-//#define PSG_DEVIDE_FACTOR 5
-//#define PSG_NUMBERS 3
-//#define PSG_DEVIDE_FACTOR 7
-#define PSG_NUMBERS 4
+#ifdef CH32V20x_D6
+#define SAMPLING_FREQ 48000
+#define OUTPUT_CHANNELS 2
+#define PSG_NUMBER 6
+#define PSG_DEVIDE_FACTOR 11
+#else
+#define SAMPLING_FREQ 32000
+#define OUTPUT_CHANNELS 1                               // should be 1 for CH32V003
+#define PSG_NUMBER 4
 #define PSG_DEVIDE_FACTOR 9
-//#define PSG_NUMBERS 5
+#endif
+
+//#define SAMPLING_FREQ 48000
+//#define SAMPLING_FREQ 44100
+//#define SAMPLING_FREQ 32000
+//#define SAMPLING_FREQ 22000
+
+// Select Voices
+
+//#define PSG_NUMBER 1
+//#define PSG_DEVIDE_FACTOR 3
+//#define PSG_NUMBER 2
+//#define PSG_DEVIDE_FACTOR 5
+//#define PSG_NUMBER 3
+//#define PSG_DEVIDE_FACTOR 7
+//#define PSG_NUMBER 4
+//#define PSG_DEVIDE_FACTOR 9
+//#define PSG_NUMBER 5
 //#define PSG_DEVIDE_FACTOR 11
+//#define PSG_NUMBER 6
+//#define PSG_DEVIDE_FACTOR 11
+
+//
+
+#define PSG_NUMBERS (PSG_NUMBER *OUTPUT_CHANNELS)
 
 //#define PSG_DEBUG
 
@@ -39,7 +60,7 @@ uint32_t psg_osc_counter[3 * PSG_NUMBERS];
 uint8_t psg_tone_volume[3 * PSG_NUMBERS];
 uint8_t psg_tone_on[3 * PSG_NUMBERS];
 
-uint16_t psg_master_volume = 0;
+uint16_t psg_master_volume[OUTPUT_CHANNELS];
 
 uint8_t psg_midi_inuse[3 * PSG_NUMBERS];
 uint8_t psg_midi_inuse_ch[3 * PSG_NUMBERS];
@@ -47,9 +68,17 @@ uint8_t psg_midi_note[3 * PSG_NUMBERS];
 
 uint8_t midi_ch_volume[16];
 
-const uint16_t psg_volume[] = { 0x00, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x04,
-        0x05, 0x06, 0x07, 0x08, 0x09, 0x0b, 0x0d, 0x10, 0x13, 0x17, 0x1b, 0x20,
-        0x26, 0x2d, 0x36, 0x40, 0x4c, 0x5a, 0x6b, 0x80, 0x98, 0xb4, 0xd6, 0xff };
+// Volume table (LOG)
+/*
+ const uint16_t psg_volume[] = { 0x00, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x04,
+ 0x05, 0x06, 0x07, 0x08, 0x09, 0x0b, 0x0d, 0x10, 0x13, 0x17, 0x1b, 0x20,
+ 0x26, 0x2d, 0x36, 0x40, 0x4c, 0x5a, 0x6b, 0x80, 0x98, 0xb4, 0xd6, 0xff };
+ */
+
+// Volume table (LINER)
+const uint16_t psg_volume[] = { 0x00, 0x00, 0x17, 0x20, 0x27, 0x30, 0x37, 0x40,
+        0x47, 0x50, 0x57, 0x60, 0x67, 0x70, 0x77, 0x80, 0x87, 0x90, 0x97, 0xa0,
+        0xa7, 0xb0, 0xb7, 0xc0, 0xc7, 0xd0, 0xd7, 0xe0, 0xe7, 0xf0, 0xf7, 0xff };
 
 //
 
@@ -68,6 +97,51 @@ volatile uint8_t rxbuff[RX_BUFFER_LEN];
 uint8_t rxptr = 0;
 uint32_t lastptr = RX_BUFFER_LEN;
 
+#ifdef CH32V20x_D6
+void TIM2_PWMOut_Init(u16 arr, u16 psc, u16 ccp) {
+    TIM_OCInitTypeDef TIM_OCInitStructure = {0};
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = {0};
+
+    TIM_TimeBaseInitStructure.TIM_Period = arr;
+    TIM_TimeBaseInitStructure.TIM_Prescaler = psc;
+    TIM_TimeBaseInitStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+    TIM_TimeBaseInitStructure.TIM_CounterMode = TIM_CounterMode_Up;
+    TIM_TimeBaseInit( TIM2, &TIM_TimeBaseInitStructure);
+
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+
+#if OUTPUT_CHANNELS>3
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = ccp;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OC1Init( TIM2, &TIM_OCInitStructure);
+    TIM_OC1PreloadConfig( TIM2, TIM_OCPreload_Disable);
+#endif
+#if OUTPUT_CHANNELS>2
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = ccp;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OC2Init( TIM2, &TIM_OCInitStructure);
+    TIM_OC2PreloadConfig( TIM2, TIM_OCPreload_Disable);
+#endif
+#if OUTPUT_CHANNELS>1
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = ccp;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OC3Init( TIM2, &TIM_OCInitStructure);
+    TIM_OC3PreloadConfig( TIM2, TIM_OCPreload_Disable);
+#endif
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = ccp;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OC4Init( TIM2, &TIM_OCInitStructure);
+    TIM_OC4PreloadConfig( TIM2, TIM_OCPreload_Disable);
+
+    TIM_CtrlPWMOutputs(TIM2, ENABLE);
+    TIM_ARRPreloadConfig( TIM2, ENABLE);
+    TIM_Cmd( TIM2, ENABLE);
+}
+#else
 void TIM1_PWMOut_Init(u16 arr, u16 psc, u16 ccp) {
     TIM_OCInitTypeDef TIM_OCInitStructure = { 0 };
     TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = { 0 };
@@ -90,18 +164,42 @@ void TIM1_PWMOut_Init(u16 arr, u16 psc, u16 ccp) {
     TIM_ARRPreloadConfig( TIM1, ENABLE);
     TIM_Cmd( TIM1, ENABLE);
 }
+#endif
 
 void toneinit(void) {
 
     GPIO_InitTypeDef GPIO_InitStructure = { 0 };
 
 #ifdef CH32V20x_D6
-    RCC_APB2PeriphClockCmd( RCC_APB2Periph_GPIOA | RCC_APB2Periph_TIM1, ENABLE);
+    RCC_APB2PeriphClockCmd( RCC_APB2Periph_GPIOA, ENABLE);
+    RCC_APB1PeriphClockCmd( RCC_APB1Periph_TIM2, ENABLE);
 
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_11;
+#if OUTPUT_CHANNELS>3
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init( GPIOA, &GPIO_InitStructure);
+#endif
+
+#if OUTPUT_CHANNELS>2
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_1;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init( GPIOA, &GPIO_InitStructure);
+#endif
+
+#if OUTPUT_CHANNELS>1
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init( GPIOA, &GPIO_InitStructure);
+#endif
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init( GPIOA, &GPIO_InitStructure);
+
 #else
     RCC_APB2PeriphClockCmd( RCC_APB2Periph_GPIOC | RCC_APB2Periph_TIM1, ENABLE);
 
@@ -112,10 +210,17 @@ void toneinit(void) {
 #endif
 
 #ifdef PSG_DEBUG
+#ifdef CH32V20x_D6
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4;    // for debug
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init( GPIOA, &GPIO_InitStructure);
+#else
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3;    // for debug
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init( GPIOC, &GPIO_InitStructure);
+#endif
 #endif
 
 }
@@ -153,6 +258,15 @@ void usart_init(uint32_t baudrate) {
     GPIO_InitTypeDef GPIO_InitStructure;
     USART_InitTypeDef USART_InitStructure;
 
+#ifdef CH32V20x_D6
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_USART1,
+            ENABLE);
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
+#else
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD | RCC_APB2Periph_USART1,
             ENABLE);
 
@@ -160,12 +274,16 @@ void usart_init(uint32_t baudrate) {
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
     GPIO_Init(GPIOD, &GPIO_InitStructure);
+#endif
 
 #ifdef PSG_DEBUG
+#ifdef CH32V20x_D6
+#else
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_5;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
     GPIO_Init(GPIOD, &GPIO_InitStructure);
+#endif
 #endif
 
     USART_InitStructure.USART_BaudRate = baudrate;
@@ -258,13 +376,13 @@ int main(void) {
     // NVIC_SetPriority(SysTicK_IRQn, 0);
     NVIC_EnableIRQ(SysTicK_IRQn);
     SysTick->SR &= ~(1 << 0);
+#ifdef CH32V20x_D6
+    SysTick->CMP = (uint64_t) ((SystemCoreClock / SAMPLING_FREQ) - 1);
+#else
     SysTick->CMP = (SystemCoreClock / SAMPLING_FREQ) - 1;
+#endif
     SysTick->CNT = 0;
     SysTick->CTLR = 0xF;
-
-    for (int i = 0; i < RX_BUFFER_LEN; i++) {
-        rxbuff[i] = 255;
-    }
 
 #ifdef PSG_DEBUG
     USART_Printf_Init(115200);
@@ -277,7 +395,11 @@ int main(void) {
     RX_BUFFER_LEN);
 
     toneinit();
+#ifdef CH32V20x_D6
+    TIM2_PWMOut_Init(256, 0, 255);  // 48MHz * 256 = 5us
+#else
     TIM1_PWMOut_Init(256, 0, 255);  // 48MHz * 256 = 5us
+#endif
 
     // Initialize PSG
 
@@ -285,6 +407,9 @@ int main(void) {
     //      printf("%x ",usart_getch());
     //  }
 
+    for (int i = 0; i < OUTPUT_CHANNELS; i++) {
+        psg_master_volume[i] = 0;
+    }
     psg_reset();
 
     while(1) {
@@ -431,16 +556,32 @@ void SysTick_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void SysTick_Handler(void) {
 
     uint32_t pon_count;
-    uint16_t master_volume;
+    uint16_t master_volume[OUTPUT_CHANNELS];
     uint8_t tone_output[3 * PSG_NUMBERS];
     uint8_t enable_channels;
 
-//    TIM1->CH4CVR = psg_master_volume / (3 * PSG_NUMBERS);
+#ifdef CH32V20x_D6
+    TIM2->CH4CVR = psg_master_volume[0];
+#if OUTPUT_CHANNELS>1
+    TIM2->CH3CVR = psg_master_volume[1];
+#endif
+#if OUTPUT_CHANNELS>2
+    TIM2->CH2CVR = psg_master_volume[2];
+#endif
+#if OUTPUT_CHANNELS>3
+    TIM2->CH1CVR = psg_master_volume[3];
+#endif
 
-    TIM1->CH4CVR = psg_master_volume;
+#else   //CH32V003
+    TIM1->CH4CVR = psg_master_volume[0];
+#endif
 
 #ifdef PSG_DEBUG
+#ifdef CH32V20x_D6
+    GPIO_WriteBit(GPIOA, GPIO_Pin_4, Bit_SET);
+#else
     GPIO_WriteBit(GPIOC, GPIO_Pin_3, Bit_SET);
+#endif
 #endif
 
 // Run Oscillator
@@ -459,35 +600,39 @@ void SysTick_Handler(void) {
 
 // Mixer
 
-    master_volume = 0;
+    for (int i = 0; i < OUTPUT_CHANNELS; i++) {
+        master_volume[i] = 0;
+    }
+
     enable_channels = 0;
 
     for (int i = 0; i < 3 * PSG_NUMBERS; i++) {
         if (psg_tone_on[i] == 1) {
             if (tone_output[i] != 0) {
-                master_volume += psg_volume[midi_ch_volume[psg_midi_inuse_ch[i]]
-                        * 2 + 1];
+                master_volume[i % OUTPUT_CHANNELS] +=
+                        psg_volume[midi_ch_volume[psg_midi_inuse_ch[i]] * 2 + 1];
+
             }
             enable_channels++;
         }
     }
 
-//    psg_master_volume = master_volume / (3 * PSG_NUMBERS);
+    for (int i = 0; i < OUTPUT_CHANNELS; i++) {
+        psg_master_volume[i] = master_volume[i] / PSG_DEVIDE_FACTOR;
 
-    psg_master_volume = master_volume / PSG_DEVIDE_FACTOR;
+        if (psg_master_volume[i] > 255)
+            psg_master_volume[i] = 255;
 
-//    if(enable_channels!=0) {
-//        psg_master_volume = master_volume / enable_channels;
-//    } else {
-//        psg_master_volume=0;
-//    }
+    }
 
-    if (psg_master_volume > 255)
-        psg_master_volume = 255;
     SysTick->SR &= 0;
 
 #ifdef PSG_DEBUG
+#ifdef CH32V20x_D6
+    GPIO_WriteBit(GPIOA, GPIO_Pin_4, Bit_RESET);
+#else
     GPIO_WriteBit(GPIOC, GPIO_Pin_3, Bit_RESET);
+#endif
 #endif
 
 }
