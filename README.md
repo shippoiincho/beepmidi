@@ -5,6 +5,11 @@ MIDI CH10 以外の音を先着順に12音まで(203なら36音)発声できま�
 (CH10 は GM ではドラムなので…)
 
 ## 使い方
+
+プロジェクトは MounRiverStudio のCH32V003 の設定になっています。
+CH32V203 で使う場合は、新しいプロジェクトを作った上で、User/main.c をコピーしてください。
+クロックの設定を忘れずに 144MHz に変えてください。<br>
+
 シリアルポートを使う場合は、何らかの USB-Serial ブリッジ(みんな持ってる WCH-LinkE でOK)を経由して、
 USART1 の RX である PD6 (203なら PA11)につなぎます。
 Windows から鳴らす場合は LoopMidi と Hairless MIDI-Serial Bride を使えば、任意の MIDI プレイヤーの出力を流すことができます。<br>
