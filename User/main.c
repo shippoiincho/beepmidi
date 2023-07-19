@@ -1,6 +1,14 @@
 /*
- * Serial MIDI player for CH32V003/203
+ * Serial/USB MIDI player for CH32V003/V203
+ *
+ *  for 003
+ *  Input: USART1 RX (PD6)
  *  Output: TIM1CH4 (PC4)
+ *
+ *  for 203
+ *  Input: USART1 RX (PA11)
+ *   or  : USB-OTG (PB6/7)
+ *  Output: TIM2CH4/3 (PA2/3)
  */
 
 #include "debug.h"
@@ -13,6 +21,27 @@
 
 #define SERIAL_SPEED 115200                            // USB-Serial Bridge
 //#define SERIAL_SPEED 31250                             // MIDI interface(31.25Kbps)
+
+#ifdef CH32V20x_D6
+// USB MIDI on USB-OTG interface
+// if you want to disable this option, please exclude USB_Device folder in build setting.
+#define USE_USB_MIDI
+#endif
+
+#ifdef USE_USB_MIDI
+#include "ch32v20x_usbfs_device.h"
+#include "usbmidi.h"
+
+__attribute__ ((aligned(4))) uint8_t midi_buff[DEF_USBD_FS_PACK_SIZE * MIDI_RX_PACKETS ];
+volatile uint8_t midi_packetlen[MIDI_RX_PACKETS];
+volatile uint32_t midi_load_count = 0;
+volatile uint32_t midi_remain_count = 0;
+volatile uint8_t midi_stop_flag = 0;
+
+#define GETCH() usb_getch()
+#else
+#define GETCH() usart_getch()
+#endif
 
 #ifdef CH32V20x_D6
 #define SAMPLING_FREQ 48000
@@ -99,8 +128,8 @@ uint32_t lastptr = RX_BUFFER_LEN;
 
 #ifdef CH32V20x_D6
 void TIM2_PWMOut_Init(u16 arr, u16 psc, u16 ccp) {
-    TIM_OCInitTypeDef TIM_OCInitStructure = {0};
-    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = {0};
+    TIM_OCInitTypeDef TIM_OCInitStructure = { 0 };
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = { 0 };
 
     TIM_TimeBaseInitStructure.TIM_Period = arr;
     TIM_TimeBaseInitStructure.TIM_Prescaler = psc;
@@ -143,8 +172,8 @@ void TIM2_PWMOut_Init(u16 arr, u16 psc, u16 ccp) {
 }
 #else
 void TIM1_PWMOut_Init(u16 arr, u16 psc, u16 ccp) {
-    TIM_OCInitTypeDef TIM_OCInitStructure = { 0 };
-    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = { 0 };
+    TIM_OCInitTypeDef TIM_OCInitStructure = {0};
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = {0};
 
     TIM_TimeBaseInitStructure.TIM_Period = arr;
     TIM_TimeBaseInitStructure.TIM_Prescaler = psc;
@@ -233,6 +262,7 @@ void psg_reset(void) {
         psg_osc_freq[i] = 0;
         psg_tone_on[i] = 0;
         psg_tone_volume[i] = 0;
+        psg_midi_inuse[i]=0;
     }
 }
 
@@ -326,6 +356,7 @@ void DMA_Rx_Init(DMA_Channel_TypeDef *DMA_CHx, u32 ppadr, u32 memadr,
 
 }
 
+#ifndef USE_USB_MIDI
 static inline uint8_t usart_getch() {
 
     uint8_t ch;
@@ -351,11 +382,80 @@ static inline uint8_t usart_getch() {
 
     return ch;
 
-    /*
-     while(USART_GetFlagStatus(USART1, USART_FLAG_RXNE) == RESET);
-     return USART_ReceiveData(USART1);
-     */
 }
+#endif
+
+#ifdef USE_USB_MIDI
+static inline uint8_t usb_getch() {
+
+    static uint8_t midi_read_count = MIDI_RX_PACKETS;
+    static uint8_t midi_read_ptr = 0;
+    static uint8_t midi_ptr = 0;
+    static uint8_t midi_data[4];
+    uint8_t ch, load_flag;
+
+    restart: if (midi_ptr != 0) {
+        midi_ptr++;
+        ch = midi_data[midi_ptr];
+        if (midi_ptr == 3)
+            midi_ptr = 0;
+        return ch;
+    }
+
+    load_flag = 0;
+#ifdef PSG_DEBUG
+    printf("USB:packets %d %d %d %d/%d\n\r",midi_load_count,midi_read_count,midi_remain_count,midi_read_ptr,midi_packetlen[midi_read_count]);
+#endif
+    //   if(midi_remain_count==0) {  // check last packet
+    if (midi_read_ptr >= midi_packetlen[midi_read_count]) {  // shoud load next packet
+        load_flag = 1;
+    } else {
+        ch = midi_buff[DEF_USBD_FS_PACK_SIZE * midi_read_count + midi_read_ptr];
+        if (ch == 0)
+            load_flag = 1;
+    }
+//    }
+#ifdef PSG_DEBUG
+    printf("USB:load_flag %d %d %x\n\r",load_flag,ch,USBOTG_FS->UEP2_RX_CTRL);
+#endif
+    if (load_flag == 1) {
+        midi_read_ptr = 0;
+        while(load_flag==1) {
+            while(midi_remain_count==0);
+            midi_read_count++;
+#ifdef PSG_DEBUG
+            printf("USB:packets %d %d %d %d/%d\n\r",midi_load_count,midi_read_count,midi_remain_count,midi_read_ptr,midi_packetlen[midi_read_count]);
+#endif
+            if (midi_read_count >= MIDI_RX_PACKETS)
+                midi_read_count = 0;
+            midi_remain_count--;
+            if(midi_packetlen[midi_read_count]>=4) load_flag=0;
+        }
+
+        if (midi_stop_flag == 1) {
+            midi_stop_flag = 0;
+            USBOTG_FS->UEP2_RX_CTRL &= ~USBFS_UEP_R_RES_MASK;
+            USBOTG_FS->UEP2_RX_CTRL |= USBFS_UEP_R_RES_ACK;
+        }
+    }
+
+    for (int i = 0; i < 4; i++) {
+        midi_data[i] = midi_buff[DEF_USBD_FS_PACK_SIZE * midi_read_count
+                + midi_read_ptr + i];
+    }
+
+    midi_read_ptr += 4;
+
+    if ((midi_data[0] & 0xf0) != 0) {
+
+        goto restart;
+    }
+    midi_ptr = 1;
+
+    return midi_data[1];
+
+}
+#endif
 
 /*********************************************************************
  * @fn      main
@@ -368,10 +468,30 @@ int main(void) {
 
     uint8_t midicmd, midich, midicc1, midicc2, midinote, midivel;
     uint8_t override;
+    NVIC_InitTypeDef NVIC_InitStructure = { 0 };
 
     // Intialize systick interrupt by sampling frequency
 
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
+
+#ifdef USE_USB_MIDI
+    //   RCC_Configuration();
+    USBFS_RCC_Init();
+    USBFS_Device_Init(ENABLE);
+
+    NVIC_InitStructure.NVIC_IRQChannel = SysTicK_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 2;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+    NVIC_InitStructure.NVIC_IRQChannel = USBHD_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+#endif
 
     // NVIC_SetPriority(SysTicK_IRQn, 0);
     NVIC_EnableIRQ(SysTicK_IRQn);
@@ -398,7 +518,7 @@ int main(void) {
 #ifdef CH32V20x_D6
     TIM2_PWMOut_Init(256, 0, 255);  // 48MHz * 256 = 5us
 #else
-    TIM1_PWMOut_Init(256, 0, 255);  // 48MHz * 256 = 5us
+            TIM1_PWMOut_Init(256, 0, 255);  // 48MHz * 256 = 5us
 #endif
 
     // Initialize PSG
@@ -416,19 +536,21 @@ int main(void) {
 
         // Listen USART
 
-        midicmd=usart_getch();
+        midicmd=GETCH();
         midich=midicmd&0xf;
 
 #ifdef PSG_DEBUG
 
-        printf("%02x\n\r",midicmd);
+        printf("CMD:%02x\n\r",midicmd);
 
 #endif
 
         switch(midicmd&0xf0) {
             case 0x80: // Note off
-            midinote=usart_getch();
-            midivel=usart_getch();
+
+            midinote=GETCH();
+            midivel=GETCH();
+
 #ifdef PSG_DEBUG
             printf("Note off: %d %d %d\n\r",midich,midinote,midivel);
 #endif
@@ -443,8 +565,10 @@ int main(void) {
             break;
 
             case 0x90: // Note on
-            midinote=usart_getch();
-            midivel=usart_getch();
+
+            midinote=GETCH();
+            midivel=GETCH();
+
             if(midich!=9) {
 #ifdef PSG_DEBUG
                 printf("Note on: %d %d %d\n\r",midich,midinote,midivel);
@@ -499,11 +623,13 @@ int main(void) {
 
             case 0xb0:
             // Channel control
-            midicc1=usart_getch();
+
+            midicc1=GETCH();
+
             switch(midicc1) {
                 case 7:
                 case 11: // Expression
-                midicc2=usart_getch();
+                midicc2=GETCH();
 #ifdef PSG_DEBUG
                 printf("Expression: %d %d\n\r",midich,midicc2);
 #endif
